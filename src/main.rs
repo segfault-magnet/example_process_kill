@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use sysinfo::System;
 use tokio::{process::Command, sync::Mutex};
 
+#[derive(Debug, Clone)]
 struct AliveProcess {
     id: u32,
     name: String,
@@ -19,44 +20,58 @@ impl Runner {
         tokio::task::spawn(async move {
             loop {
                 let system = System::new_all();
-                println!("----");
-                for process in processes.lock().await.iter() {
-                    let pid = &sysinfo::Pid::from(process.id as usize);
-                    let alive = if system.processes().contains_key(pid) {
-                        "Alive"
-                    } else {
-                        "Dead"
-                    };
-                    println!("{} - {}: {}", process.name, process.id, alive);
+                let status = processes
+                    .lock()
+                    .await
+                    .clone()
+                    .into_iter()
+                    .map(|process| {
+                        let pid = &sysinfo::Pid::from(process.id as usize);
+                        let alive = system.processes().contains_key(pid);
+                        (process, alive)
+                    })
+                    .collect::<Vec<_>>();
+
+                let status_string = status
+                    .iter()
+                    .map(|(process, alive)| {
+                        format!("{}({}) -- alive: {alive}", process.name, process.id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                eprintln!("--\n{}\n", status_string);
+
+                if !status.is_empty() && status.iter().all(|(_, alive)| !alive) {
+                    break;
                 }
-                println!("----");
+
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
         })
     }
 
-    async fn run_and_wait_for_status(&self, binary: impl ToString) -> anyhow::Result<()> {
-        let processes = Arc::clone(&self.processes);
-        let binary = binary.to_string();
-        let mut child = Command::new(&binary).kill_on_drop(true).spawn()?;
-        let id = child.id().unwrap();
+    async fn run_and_wait_for_completion(&self, binary: &str) -> anyhow::Result<()> {
+        let mut child = Command::new(binary).kill_on_drop(true).spawn()?;
 
         let process = AliveProcess {
-            id,
+            id: child.id().unwrap(),
             name: binary.to_string(),
         };
-        processes.lock().await.push(process);
+
+        self.processes.lock().await.push(process);
 
         child.wait().await?;
+
         Ok(())
     }
 
     async fn run_fuzzer(&self) -> anyhow::Result<()> {
-        self.run_and_wait_for_status("./never_ending.sh").await
+        self.run_and_wait_for_completion("./never_ending.sh").await
     }
 
     async fn run_timeouter(&self) -> anyhow::Result<()> {
-        self.run_and_wait_for_status("./finishes_fast.sh").await
+        self.run_and_wait_for_completion("./finishes_fast.sh").await
     }
 
     async fn run_fuzzers(self) -> anyhow::Result<()> {
@@ -68,13 +83,13 @@ impl Runner {
 
             tokio::select! {
                 _ = never_ending_1 => {
-                    println!("never_ending_1 finished");
+                    println!("Should not happen")
                 }
                 _ = never_ending_2 => {
-                    println!("never_ending_2 finished");
+                    println!("Should not happen")
                 }
                 _ = never_ending_3 => {
-                    println!("never_ending_3 finished");
+                    println!("Should not happen")
                 }
                 _ = short_lived => {
                     println!("short_lived finished");
